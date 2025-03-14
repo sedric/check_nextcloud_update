@@ -1,0 +1,64 @@
+#!/bin/bash
+
+# This script depends of:
+# - jq (for urlencoding)
+# - xml2 (to translate xml to grepable string)
+
+## SCRIPT CONFIG
+ncdir=/var/www/${$1:-nextcloud}
+ncconfig=$ncdir/config/config.php
+php_bin=/usr/bin/php
+tempfile=/tmp/ncnextup_${1:-default}
+# tempfile max age, arg will by send to date(1) -d option with
+# the "ago" word right after, check man for semantic
+validity="12hours"
+
+## UPDATE SERVER CONFIG
+release_channel="stable"
+server=updates.nextcloud.org
+URI=/updater_server/?version=
+
+## URL PARAMETERS
+# Dots in version numbers have to be replaced by "x"
+nccur=$(sed -rn "/version/{s/.* .([\.0-9]*).,/\1/p}"  "$ncconfig")
+nc_vers=$(echo $nccur | sed -rn 's/\./x/g;p')
+php_vers=$($php_bin --version 2>&1 |sed -rn '1{s/PHP ([\.0-9]*) \(cli\).*/\1/;s/\./x/g;p}')
+# Build time is a date in YYYY-MM-DDThh:mm:ss+00:00(+string)
+# Should be the one of NC but I don't know how to get it
+# This should be fine
+build_time=$(date -Iseconds| jq -sRr @uri)
+
+params=${nc_vers}xxx${release_channel}xx${build_time}x${php_vers}
+URL=https://${server}/${URI}${params}
+
+if [ -f "$tempfile" ] && [ $(stat -c %W $tempfile) -gt $(date +%s -d "${validity} ago") ]
+then
+  :
+else
+  [ -f "$tempfile" ] && rm "$tempfile"
+  echo $URL
+  wget -qO "$tempfile" "$URL"
+fi
+
+ncnext=$(cat "$tempfile" | xml2 | sed -rn '/nextcloud.version=/{s/.*=(.*)/\1/p}')
+
+for i in {1..3}
+do
+  next=$(echo $ncnext | cut -d '.' -f $i)
+  cur=$(echo $nccur | cut -d '.' -f $i)
+
+  if [ $next -gt $cur ]
+  then
+    echo "{$1:-Nextcloud} Update available: $ncnext (from $nccur)"
+    if [ $i -eq 1 ]
+    then
+      # Major version change
+      exit 2 # Critical for nagios
+    else
+      # Minor version change
+      exit 1 # Warning for nagios
+    fi
+  fi
+done
+
+exit 0
